@@ -709,4 +709,4 @@ Contribuições são bem-vindas! Para contribuir:
 
 ---
 
-**Desenvolvido com ☕ pela equipe LeetJourney**
+****
