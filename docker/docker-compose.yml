@@ -1,0 +1,95 @@
+version: '3.9'
+
+services:
+  db:
+    image: mysql:8.0.44
+    container_name: mysql-home-energy
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-rootpass}"
+      MYSQL_DATABASE: "${MYSQL_DATABASE:-energy_db}"
+      MYSQL_USER: "${MYSQL_USER:-energy_user}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:-energypass}"
+    ports:
+      - "3307:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-rootpass}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  zookeeper:
+    image: zookeeper:3.8
+    container_name: zookeeper-home-energy
+    restart: unless-stopped
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka-home-energy
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092" # Porta para o uso interno/externo via IP
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+
+      # CORREÇÃO CRÍTICA DO LISTENER:
+      # 1. PLAINTEXT (interno do Docker, usando o nome do serviço)
+      # 2. EXTERNAL (para o seu host Ubuntu, usando o IP real)
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,EXTERNAL://192.168.1.89:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      # Adicionando healthcheck básico para que o Ingestion-Service possa aguardar
+      KAFKA_HEALTHCHECK_ON_STARTUP_TIMEOUT: 600
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui-home-energy
+    ports:
+      - "8070:8080"
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local-kafka
+      # O UI usa o listener interno (via nome de serviço do Docker)
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+
+  ingestion-service:
+    build:
+      context: ../ingestion-service
+      dockerfile: Dockerfile
+    image: ingestion-service:latest
+    container_name: ingestion-service
+    ports:
+      - "8082:8082"
+    depends_on:
+      kafka:
+        condition: service_started # Mudança para started, healthcheck é muito complexo aqui
+      db:
+        condition: service_healthy
+    environment:
+      # CORREÇÃO: Spring Boot deve usar o endereço de anúncio externo do KAFKA
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: 192.168.1.89:9092
+      SPRING_DATASOURCE_URL: jdbc:mysql://db:3306/${MYSQL_DATABASE:-energy_db}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: ${MYSQL_USER:-energy_user}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:-energypass}
+      SPRING_PROFILES_ACTIVE: dev
+      LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_KAFKA: DEBUG
+    restart: unless-stopped
+
+volumes:
+  db_data:
